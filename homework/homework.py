@@ -96,3 +96,118 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import balanced_accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import pandas as pd
+import gzip
+import joblib
+import json
+import os
+
+# Cargar datos
+df_train = pd.read_csv("./files/input/train_data.csv.zip", index_col=False, compression="zip")
+df_test = pd.read_csv("./files/input/test_data.csv.zip", index_col=False, compression="zip")
+
+# Limpiar datos
+def clean_data(df):
+    df = df.rename(columns={'default payment next month': "default"})
+    df = df.drop(columns=["ID"])
+    df = df.loc[df["MARRIAGE"] != 0]
+    df = df.loc[df["EDUCATION"] != 0]
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x >= 4 else x)
+    return df.dropna()
+
+df_train_clean = clean_data(df_train)
+df_test_clean = clean_data(df_test)
+
+# Dividir datos
+x_train = df_train_clean.drop(columns=["default"])
+y_train = df_train_clean["default"]
+x_test = df_test_clean.drop(columns=["default"])
+y_test = df_test_clean["default"]
+
+# Crear pipeline
+categorical_cols = ["SEX", "EDUCATION", "MARRIAGE"]
+numerical_cols = [col for col in x_train.columns if col not in categorical_cols]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(), categorical_cols),
+        ('num', StandardScaler(), numerical_cols),
+    ]
+)
+
+pipeline = make_pipeline(
+    preprocessor,
+    SelectKBest(score_func=f_classif),
+    PCA(),
+    MLPClassifier(max_iter=15000, random_state=21)
+)
+
+# Optimizar hiperparámetros
+param_grid = {
+    "selectkbest__k": [20],
+    "pca__n_components": [None],
+    "mlpclassifier__hidden_layer_sizes": [(50, 30, 40, 60)],
+    "mlpclassifier__alpha": [0.26],
+    'mlpclassifier__learning_rate_init': [0.001],
+}
+
+grid_search = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    cv=10,
+    scoring='balanced_accuracy',
+    n_jobs=-1,
+    refit=True
+)
+
+grid_search.fit(x_train, y_train)
+
+# Guardar modelo (mejor estimador de GridSearchCV)
+os.makedirs("files/models/", exist_ok=True)
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    joblib.dump(grid_search.best_estimator_, f)  # Guardar el mejor estimador
+
+# Función para calcular y guardar métricas
+def calculate_metrics(y_true, y_pred, dataset_type):
+    return {
+        "type": "metrics",
+        "dataset": dataset_type,
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1_score": f1_score(y_true, y_pred, zero_division=0),
+    }
+
+def calculate_confusion_matrix(y_true, y_pred, dataset_type):
+    cm = confusion_matrix(y_true, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_type,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])},
+    }
+
+# Calcular y guardar métricas
+os.makedirs("files/output/", exist_ok=True)
+with open("files/output/metrics.json", "w", encoding="utf-8") as file:
+    # Calcular métricas y matrices de confusión para el conjunto de entrenamiento
+    train_metrics = calculate_metrics(y_train, grid_search.predict(x_train), "train")
+    train_conf_matrix = calculate_confusion_matrix(y_train, grid_search.predict(x_train), "train")
+    
+    # Calcular métricas y matrices de confusión para el conjunto de prueba
+    test_metrics = calculate_metrics(y_test, grid_search.predict(x_test), "test")
+    test_conf_matrix = calculate_confusion_matrix(y_test, grid_search.predict(x_test), "test")
+    
+    # Escribir las métricas y matrices de confusión en el orden deseado
+    file.write(json.dumps(train_metrics) + "\n")
+    file.write(json.dumps(test_metrics) + "\n")
+    file.write(json.dumps(train_conf_matrix) + "\n")
+    file.write(json.dumps(test_conf_matrix) + "\n")
